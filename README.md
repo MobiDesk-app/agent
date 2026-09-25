@@ -1,8 +1,8 @@
 # Home Relay — PC Agent
 
 The background process that runs on your home PC. It connects to the
-[backend](../backend), reports what's on your LAN, and — as of Phase 3 —
-captures your screen and streams it over WebRTC to whichever phone connects.
+[backend](../backend), reports what's on your LAN, streams your screen over
+WebRTC, and — as of Phase 4 — applies remote mouse input to the real OS.
 
 ## What's built so far
 
@@ -22,13 +22,17 @@ captures your screen and streams it over WebRTC to whichever phone connects.
 - Answers a phone's WebRTC offer (the agent is always the *answerer* — see
   `backend/README.md`'s signaling sequence) and streams the screen as a
   video track
-- A `RTCDataChannel` for remote input already opens end-to-end; the agent
-  logs incoming input events but doesn't act on them yet (see "Not done yet")
+
+**Phase 4 — remote input injection:**
+- The phone's `RTCDataChannel` messages are parsed, schema-validated, and
+  applied to the real OS via `@nut-tree-fork/nut-js`
+- Supported today: `mousemove` (as a 0..1 fraction of screen width/height,
+  so it's independent of the phone's resolution), `mousedown`/`mouseup`,
+  `wheel`, `keydown`/`keyup`
 
 ## What's NOT built yet
 
-- Remote mouse/keyboard input injection (the data channel works, nothing
-  applies the events to the OS)
+- Full keyboard key-name mapping (see "Not done yet" below)
 - Multiple simultaneous viewers (a second phone's offer replaces the first
   session rather than running both — logged as a warning when it happens)
 - Auto-start on login, tray icon, packaging/installer
@@ -59,6 +63,10 @@ src/                          framework-agnostic core (no Electron/DOM types)
                                  (offer/answer/ice-candidate) — no DOM lib types, so
                                  it compiles under both src/'s Node-only tsconfig and
                                  the renderer's DOM+Node one
+    inputEvent.ts                zod schema + type for one remote input event
+                                 (mousemove/mousedown/mouseup/wheel/keydown/keyup) —
+                                 validated where it's parsed off the data channel,
+                                 not just cast
   agent.ts                      orchestrator: wires SignalingClient + arpScanner +
                                  an RtcSessionHandler together via constructor injection
   index.ts                      plain-Node entrypoint (Phase 2 mode: LAN reporting only,
@@ -67,20 +75,27 @@ src/                          framework-agnostic core (no Electron/DOM types)
 
 electron/                     Electron-specific (DOM + Node lib, its own tsconfig)
   main.ts                      real entrypoint (`npm run electron:start`). Builds the
-                                 same Agent core as index.ts, but wires a real
-                                 RtcSessionHandler that forwards signals into the
-                                 hidden renderer
+                                 same Agent core as index.ts, wires a real
+                                 RtcSessionHandler that forwards signals into the hidden
+                                 renderer, and applies validated input events via
+                                 inputInjector.ts
   electronRtcHandler.ts         implements RtcSessionHandler for Electron: main has
                                  no WebRTC stack, so it forwards signal messages via
                                  webContents.send to the renderer that does
+  inputInjector.ts              the only file that calls nut-js. Converts a validated
+                                 InputEvent into real mouse/keyboard action, using
+                                 Electron's own `screen` module to turn a 0..1 ratio
+                                 into real pixel coordinates
   preload.ts                    contextBridge surface exposed to the renderer:
-                                 get a screen source id, send/receive signal messages —
-                                 nothing else (contextIsolation on, nodeIntegration off)
+                                 get a screen source id, send/receive signal messages,
+                                 send an input event — nothing else (contextIsolation
+                                 on, nodeIntegration off)
   renderer/
     capture.html                minimal host page, loads the bundled capture.js
     capture.ts                  the only file that actually calls getUserMedia and
                                  owns the RTCPeerConnection: answers offers, streams
-                                 the screen, listens on the input data channel
+                                 the screen, and is the trust boundary for input events
+                                 (validates them before they ever reach main/the OS)
   test/
     phone-simulator.html        a plain-browser stand-in for the React Native app,
                                  used to manually verify the whole pipeline (see below)
@@ -91,28 +106,47 @@ electron/                     Electron-specific (DOM + Node lib, its own tsconfi
 - **`src/` never imports Electron or DOM types.** Everything under `src/`
   compiles under a Node-only tsconfig and has no idea it's running inside
   Electron. `electron/` is the only place that knows about `BrowserWindow`,
-  `desktopCapturer`, or `RTCPeerConnection`. This is what let Phase 3 reuse
-  `Agent`, `SignalingClient`, and `scanLan` completely unchanged.
+  `desktopCapturer`, `RTCPeerConnection`, or `nut-js`. This is what let
+  Phase 3 and Phase 4 both reuse `Agent`, `SignalingClient`, and `scanLan`
+  completely unchanged.
 - **`rtcSessionHandler.ts` is the seam.** It was written in Phase 2, before
-  any WebRTC code existed, specifically so Phase 3 could implement it without
-  touching `agent.ts` or `signalingClient.ts`. `electronRtcHandler.ts` is
-  that implementation — a few lines that forward to the renderer.
+  any WebRTC code existed, specifically so later phases could implement it
+  without touching `agent.ts` or `signalingClient.ts`. `electronRtcHandler.ts`
+  is that implementation — a few lines that forward to the renderer.
 - **Main and renderer are split because they run in different worlds.**
-  Electron's main process is plain Node — no DOM, no WebRTC. Only a renderer
-  (Chromium) has `getUserMedia`/`RTCPeerConnection`. So signaling (talking to
-  the backend over WebSocket) lives in main, and everything WebRTC-shaped
-  lives in the hidden renderer, bridged by a narrow `contextBridge` API in
-  `preload.ts` — not a wide-open `nodeIntegration: true`, which would hand
-  the renderer full Node/filesystem access it doesn't need.
-- **`signalPayload.ts` avoids `RTCIceCandidateInit` and friends.** Those are
-  DOM lib types, unavailable in `src/`'s Node-only compile. Defining our own
-  structurally-equivalent shapes keeps one payload type usable on both sides
-  of the main/renderer split.
+  Electron's main process is plain Node — no DOM, no WebRTC, and no native
+  mouse/keyboard bindings from nut-js either (they load fine in Node, but the
+  *reason* input handling lives in main isn't "nut-js needs Node" so much as
+  "the renderer shouldn't have raw OS control — only main does, behind the
+  validated IPC boundary"). Only a renderer (Chromium) has
+  `getUserMedia`/`RTCPeerConnection`. So signaling and OS input both live in
+  main, and everything WebRTC-shaped lives in the hidden renderer, bridged by
+  a narrow `contextBridge` API in `preload.ts` — not a wide-open
+  `nodeIntegration: true`, which would hand the renderer full Node/filesystem
+  access it doesn't need.
+- **Input events are validated twice, at two different boundaries.**
+  `capture.ts` validates first, because that's the real trust boundary —
+  the data channel message came straight from whatever's on the other end
+  of the connection. `main.ts` validates again before calling
+  `applyInputEvent`, because IPC between our own processes is still a
+  boundary worth not blindly trusting, and the check is nearly free.
+- **`signalPayload.ts` and `inputEvent.ts` avoid DOM lib types** like
+  `RTCIceCandidateInit`, unavailable in `src/`'s Node-only compile. Defining
+  our own structurally-equivalent shapes keeps them usable on both sides of
+  the main/renderer split.
 - **The renderer script is bundled with esbuild, not just compiled with
-  `tsc`.** It imports from `src/rtc/signalPayload.ts`, and `tsc`'s CommonJS
-  output uses `require`/`exports`, which don't exist in a plain `<script>`
-  tag (no Node integration in that renderer, by design). esbuild inlines the
-  import into one dependency-free IIFE bundle instead.
+  `tsc`.** It imports from `src/rtc/*`, and `tsc`'s CommonJS output uses
+  `require`/`exports`, which don't exist in a plain `<script>` tag (no Node
+  integration in that renderer, by design). esbuild inlines every import
+  (including `zod`) into one dependency-free IIFE bundle instead.
+
+### Accepted risk
+
+`npm audit` flags a moderate-severity, no-fix-available vulnerability in
+`jimp`/`file-type`, pulled in transitively by `@nut-tree-fork/nut-js`'s
+image-recognition feature set. This agent never calls those APIs — only
+`mouse`/`keyboard` — so the vulnerable code path is never reached. Revisit if
+nut-js ships a version with that dependency removed or made optional.
 
 ## Verified so far
 
@@ -123,22 +157,22 @@ device list was persisted in the backend's `data/devices.json`.
 **Phase 3:** ran the real backend and the actual Electron app (not a mock),
 then used `electron/test/phone-simulator.html` (served over local HTTP, a
 plain browser page standing in for the React Native app) to drive the whole
-pipeline for real:
+pipeline for real: offer → relayed through the backend → renderer calls
+`desktopCapturer`/`getUserMedia` for real → answer + ICE exchanged → the
+simulator's `<video>` element rendered the **real, live desktop screen**,
+confirmed visually via a screenshot, not just "connection established" logs.
 
-1. Simulator authenticates to the backend as an `"app"` client.
-2. Simulator creates a WebRTC offer and sends it through the backend's
-   `signal` relay, targeting `pc-1`.
-3. The Electron agent's main process receives it and forwards it to the
-   hidden renderer via IPC.
-4. The renderer calls `desktopCapturer` + `getUserMedia`, actually captures
-   the live screen, answers the offer, and streams the video track back.
-5. ICE candidates flow both directions through the same relay.
-6. The simulator's `<video>` element renders the **real, live desktop
-   screen** — confirmed visually via a screenshot, not just "connection
-   established" logs.
+**Phase 4:** with that same connection open, added a data channel and two
+buttons to the simulator ("move to 10%,10%" / "move to 90%,90%"), and
+independently queried the real OS cursor position via a separate PowerShell
+`System.Windows.Forms.Cursor::Position` check before and after each click:
 
-This proves the full offer → answer → ICE → media flow works end-to-end
-through the real backend, with no shortcuts.
+- Move to (10%, 10%) on a 1920×1080 screen → cursor landed at exactly
+  **(192, 108)**.
+- Move to (90%, 90%) → cursor landed at exactly **(1728, 972)**.
+
+Both match the requested ratio exactly, confirmed by a tool outside the
+Electron app itself — not by trusting the app's own logs.
 
 ## Run it
 
@@ -149,7 +183,7 @@ cp .env.example .env   # AUTH_TOKEN must match the backend's .env exactly
 npm run dev             # runs src/index.ts, restarts on change
 ```
 
-**Phase 3 mode (full agent, Electron):**
+**Phase 3/4 mode (full agent, Electron):**
 ```bash
 npm install
 cp .env.example .env
@@ -164,7 +198,7 @@ Type-check everything (src/ with Node lib, electron/ with Node+DOM lib):
 npm run typecheck
 ```
 
-### Manually testing the screen-share pipeline
+### Manually testing the full pipeline
 
 With the backend and `npm run electron:start` both running:
 ```bash
@@ -172,13 +206,15 @@ npx http-server -p 5511 electron/test   # serve the simulator over HTTP —
                                          # it needs real WebSocket/WebRTC,
                                          # which don't run from a file:// page
 ```
-Open `http://localhost:5511/phone-simulator.html`, click **Connect to pc-1**,
-and you should see your own screen streamed back within a couple of seconds.
+Open `http://localhost:5511/phone-simulator.html`, click **Connect to pc-1**
+— you should see your own screen streamed back within a couple of seconds —
+then try the two "Move cursor" buttons and watch your real mouse jump.
 
 ## What's next
 
-**Remote input injection.** The data channel from phone to PC already
-exists — `capture.ts`'s `pc.ondatachannel` handler currently just
-`console.log`s incoming messages. The next step is applying them to the OS
-with something like `@nut-tree/nut-js` (mouse move/click, keystrokes),
-behind the same handler.
+**Full keyboard mapping.** `inputEvent.ts`'s `key` field currently must
+already match a `nut-js` `Key` enum member name exactly (e.g. `"A"`,
+`"Enter"`, `"Space"`). Translating from what a real keyboard or the phone
+app's touch keyboard actually sends into that enum is a follow-up — the
+React Native app is the next major piece of work and will define what shape
+key names actually arrive in.

@@ -12,6 +12,8 @@
   <body>
     <h2>Phone simulator — manual pipeline test</h2>
     <button id="connect">Connect to pc-1</button>
+    <button id="move-tl">Move cursor: top-left (10%,10%)</button>
+    <button id="move-br">Move cursor: bottom-right (90%,90%)</button>
     <p>Video stream from Electron agent's screen capture:</p>
     <video id="remote" autoplay playsinline></video>
     <div id="log"></div>
@@ -26,6 +28,22 @@
       const TOKEN = "change-me-to-a-long-random-string";
       const TARGET = "pc-1";
       let pc;
+      let inputChannel;
+
+      function sendInputEvent(event) {
+        if (!inputChannel || inputChannel.readyState !== "open") {
+          return log("input channel not open yet");
+        }
+        inputChannel.send(JSON.stringify(event));
+        log("sent input event:", JSON.stringify(event));
+      }
+
+      document.getElementById("move-tl").addEventListener("click", () => {
+        sendInputEvent({ type: "mousemove", xRatio: 0.1, yRatio: 0.1 });
+      });
+      document.getElementById("move-br").addEventListener("click", () => {
+        sendInputEvent({ type: "mousemove", xRatio: 0.9, yRatio: 0.9 });
+      });
 
       document.getElementById("connect").addEventListener("click", async () => {
         const ws = new WebSocket("ws://localhost:8080");
@@ -54,6 +72,9 @@
               log("received remote track:", e.track.kind);
               document.getElementById("remote").srcObject = e.streams[0];
             };
+            // Must be created before the offer so it's negotiated in the SDP.
+            inputChannel = pc.createDataChannel("input");
+            inputChannel.onopen = () => log("input data channel open");
             const offer = await pc.createOffer({ offerToReceiveVideo: true });
             await pc.setLocalDescription(offer);
             ws.send(JSON.stringify({

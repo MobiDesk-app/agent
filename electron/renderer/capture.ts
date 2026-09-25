@@ -1,5 +1,6 @@
 import { isSignalPayload } from "../../src/rtc/signalPayload";
 import type { IceCandidateInit } from "../../src/rtc/signalPayload";
+import { inputEventSchema } from "../../src/rtc/inputEvent";
 
 // Exposed by electron/preload.ts via contextBridge — this is the *only*
 // bridge into the main process; no Node/Electron APIs otherwise.
@@ -7,6 +8,7 @@ interface RelayBridge {
   getPrimaryScreenSource: () => Promise<{ id: string; name: string }>;
   onIncomingSignal: (callback: (message: { from: string; payload: unknown }) => void) => void;
   sendOutgoingSignal: (target: string, payload: unknown) => void;
+  sendInputEvent: (event: unknown) => void;
 }
 declare const window: Window & { relay: RelayBridge };
 
@@ -75,12 +77,23 @@ async function handleOffer(from: string, sdp: string): Promise<void> {
     });
   };
 
-  // The phone opens this channel to send mouse/keyboard events. Actually
-  // injecting them into the OS is the next phase (nut-js) — for now this
-  // just proves the channel end-to-end.
+  // The phone opens this channel to send mouse/keyboard events. This is the
+  // real trust boundary for input events — they come straight off the wire
+  // from whatever's on the other end of the connection — so they're
+  // schema-validated here before ever reaching the main process or the OS.
   pc.ondatachannel = (event) => {
     event.channel.onmessage = (msgEvent) => {
-      console.log("[capture] input event received (injection not implemented yet):", msgEvent.data);
+      let json: unknown;
+      try {
+        json = JSON.parse(msgEvent.data);
+      } catch {
+        return console.warn("[capture] dropped malformed input event JSON");
+      }
+      const result = inputEventSchema.safeParse(json);
+      if (!result.success) {
+        return console.warn("[capture] dropped input event that failed validation:", json);
+      }
+      window.relay.sendInputEvent(result.data);
     };
   };
 

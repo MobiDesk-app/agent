@@ -13,4 +13,8 @@ contextBridge.exposeInMainWorld("relay", {
   sendOutgoingSignal: (target: string, payload: unknown): void => {
     ipcRenderer.send("rtc:outgoing-signal", target, payload);
   },
+
+  sendInputEvent: (event: unknown): void => {
+    ipcRenderer.send("rtc:input-event", event);
+  },
 });

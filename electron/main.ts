@@ -4,7 +4,9 @@ import { config } from "../src/config/env";
 import { SignalingClient } from "../src/signaling/signalingClient";
 import { scanLan } from "../src/network/arpScanner";
 import { Agent } from "../src/agent";
+import { inputEventSchema } from "../src/rtc/inputEvent";
 import { createElectronRtcHandler } from "./electronRtcHandler";
+import { applyInputEvent } from "./inputInjector";
 
 // This process never shows a window to the user — it's a background agent.
 // The single hidden BrowserWindow exists only because screen capture and
@@ -63,6 +65,21 @@ app.whenReady().then(() => {
   // Renderer produces answers/ICE candidates; only main talks to the backend.
   ipcMain.on("rtc:outgoing-signal", (_event, target: string, payload: unknown) => {
     signaling.send({ type: "signal", target, payload });
+  });
+
+  // Renderer forwards data-channel input events here because nut-js's
+  // native mouse/keyboard bindings only work in the main process. Validated
+  // again even though the renderer already validated it — cheap, and this
+  // is still a boundary between two different pieces of code.
+  ipcMain.on("rtc:input-event", (_event, raw: unknown) => {
+    const result = inputEventSchema.safeParse(raw);
+    if (!result.success) {
+      console.warn("[input] dropped an invalid input event from renderer");
+      return;
+    }
+    applyInputEvent(result.data).catch((err) => {
+      console.error("[input] failed to apply input event:", err instanceof Error ? err.message : err);
+    });
   });
 
   // Keep running with no windows open — this is a background agent, not a
