@@ -47,6 +47,13 @@ let activePeerId: string | null = null;
 let peerConnection: RTCPeerConnection | null = null;
 let captureStream: MediaStream | null = null;
 let filesChannel: RTCDataChannel | null = null;
+// setRemoteDescription doesn't happen until after the (potentially slow —
+// IPC round-trip + getUserMedia) capture stream is ready, but ICE
+// candidates from the peer can arrive during that window. Queue them
+// instead of calling addIceCandidate before there's a remote description
+// to add them to.
+let remoteDescriptionSet = false;
+let pendingIceCandidates: IceCandidateInit[] = [];
 
 function sendFileResponse(response: FileResponse): void {
   filesChannel?.send(JSON.stringify(response));
@@ -145,6 +152,8 @@ function resetPeerConnection(): void {
   peerConnection = null;
   filesChannel = null;
   activePeerId = null;
+  remoteDescriptionSet = false;
+  pendingIceCandidates = [];
 }
 
 function setupInputChannel(channel: RTCDataChannel): void {
@@ -209,6 +218,12 @@ async function handleOffer(from: string, sdp: string): Promise<void> {
   for (const track of stream.getTracks()) pc.addTrack(track, stream);
 
   await pc.setRemoteDescription({ type: "offer", sdp });
+  remoteDescriptionSet = true;
+  for (const candidate of pendingIceCandidates) {
+    await pc.addIceCandidate(candidate);
+  }
+  pendingIceCandidates = [];
+
   const answer = await pc.createAnswer();
   await pc.setLocalDescription(answer);
   window.relay.sendOutgoingSignal(from, { kind: "answer", sdp: answer.sdp ?? "" });
@@ -216,6 +231,10 @@ async function handleOffer(from: string, sdp: string): Promise<void> {
 
 async function handleIceCandidate(candidate: IceCandidateInit): Promise<void> {
   if (!peerConnection) return;
+  if (!remoteDescriptionSet) {
+    pendingIceCandidates.push(candidate);
+    return;
+  }
   await peerConnection.addIceCandidate(candidate);
 }
 
