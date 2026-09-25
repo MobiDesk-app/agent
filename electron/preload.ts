@@ -17,4 +17,32 @@ contextBridge.exposeInMainWorld("relay", {
   sendInputEvent: (event: unknown): void => {
     ipcRenderer.send("rtc:input-event", event);
   },
+
+  listFiles: (dirPath: string | null): Promise<unknown> => ipcRenderer.invoke("files:list", dirPath),
+
+  requestDownload: (requestId: string, filePath: string): void => {
+    ipcRenderer.send("files:download-request", requestId, filePath);
+  },
+  pauseDownload: (requestId: string): void => ipcRenderer.send("files:download-pause", requestId),
+  resumeDownload: (requestId: string): void => ipcRenderer.send("files:download-resume", requestId),
+  cancelDownload: (requestId: string): void => ipcRenderer.send("files:download-cancel", requestId),
+
+  onDownloadEvent: (
+    callback: (
+      event:
+        | { kind: "start"; requestId: string; name: string; size: number }
+        | { kind: "chunk"; requestId: string; data: Uint8Array }
+        | { kind: "error"; requestId: string; message: string }
+        | { kind: "complete"; requestId: string }
+    ) => void
+  ): void => {
+    ipcRenderer.on("files:download-start", (_e, requestId, name, size) =>
+      callback({ kind: "start", requestId, name, size })
+    );
+    ipcRenderer.on("files:download-chunk", (_e, requestId, data) => callback({ kind: "chunk", requestId, data }));
+    ipcRenderer.on("files:download-error", (_e, requestId, message) =>
+      callback({ kind: "error", requestId, message })
+    );
+    ipcRenderer.on("files:download-complete", (_e, requestId) => callback({ kind: "complete", requestId }));
+  },
 });

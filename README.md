@@ -2,7 +2,8 @@
 
 The background process that runs on your home PC. It connects to the
 [backend](../backend), reports what's on your LAN, streams your screen over
-WebRTC, and — as of Phase 4 — applies remote mouse input to the real OS.
+WebRTC, applies remote mouse/keyboard input to the real OS, and — as of
+Phase 5 — lets a connected phone browse and download files.
 
 ## What's built so far
 
@@ -30,11 +31,25 @@ WebRTC, and — as of Phase 4 — applies remote mouse input to the real OS.
   so it's independent of the phone's resolution), `mousedown`/`mouseup`,
   `wheel`, `keydown`/`keyup`
 
+**Phase 5 — file browsing and download:**
+- A second `RTCDataChannel` (label `"files"`, alongside `"input"`) lets a
+  connected phone list directories and download files
+- Listing starts at "roots" — quick-access folders (Desktop, Documents,
+  Downloads, Home) plus every drive letter on Windows (or `/` elsewhere) —
+  and descends from there
+- Downloads stream in 16KB chunks with real backpressure: the renderer
+  pauses the main process's file read stream once the data channel's own
+  send buffer passes 1MB, and resumes it once the buffer drains below 256KB
+- Only one download runs at a time, matching the existing single-viewer
+  limitation elsewhere in this project
+
 ## What's NOT built yet
 
 - Full keyboard key-name mapping (see "Not done yet" below)
 - Multiple simultaneous viewers (a second phone's offer replaces the first
   session rather than running both — logged as a warning when it happens)
+- Concurrent downloads (a second download request while one is active gets
+  a "busy" `download-error`)
 - Auto-start on login, tray icon, packaging/installer
 
 ## Architecture
@@ -67,6 +82,9 @@ src/                          framework-agnostic core (no Electron/DOM types)
                                  (mousemove/mousedown/mouseup/wheel/keydown/keyup) —
                                  validated where it's parsed off the data channel,
                                  not just cast
+    fileProtocol.ts               zod schema for a file-browsing request (list/download/
+                                 cancel-download) plus the FileEntry/FileResponse shapes.
+                                 No DOM types, same reasoning as the other rtc/ files.
   agent.ts                      orchestrator: wires SignalingClient + arpScanner +
                                  an RtcSessionHandler together via constructor injection
   index.ts                      plain-Node entrypoint (Phase 2 mode: LAN reporting only,
@@ -86,19 +104,30 @@ electron/                     Electron-specific (DOM + Node lib, its own tsconfi
                                  InputEvent into real mouse/keyboard action, using
                                  Electron's own `screen` module to turn a 0..1 ratio
                                  into real pixel coordinates
-  preload.ts                    contextBridge surface exposed to the renderer:
-                                 get a screen source id, send/receive signal messages,
-                                 send an input event — nothing else (contextIsolation
-                                 on, nodeIntegration off)
+  fileSystemBrowser.ts           the only file that lists directories: listRoots() and
+                                 listDirectory(path), both plain fs/os calls
+  downloadManager.ts             streams at most one file at a time with pause/resume,
+                                 so backpressure from the data channel can throttle a
+                                 real fs.ReadStream instead of buffering a whole file
+                                 in memory
+  preload.ts                    contextBridge surface exposed to the renderer: get a
+                                 screen source id, send/receive signal messages, send
+                                 an input event, list/download files — nothing else
+                                 (contextIsolation on, nodeIntegration off)
   renderer/
     capture.html                minimal host page, loads the bundled capture.js
     capture.ts                  the only file that actually calls getUserMedia and
                                  owns the RTCPeerConnection: answers offers, streams
-                                 the screen, and is the trust boundary for input events
-                                 (validates them before they ever reach main/the OS)
+                                 the screen, and is the trust boundary for both input
+                                 events and file requests (validates them before they
+                                 ever reach main/the OS)
   test/
     phone-simulator.html        a plain-browser stand-in for the React Native app,
-                                 used to manually verify the whole pipeline (see below)
+                                 used to manually verify screen share + input (see below)
+    file-protocol-check.ts       a Node script using @roamhq/wrtc to drive the "files"
+                                 channel end-to-end against the real backend + agent —
+                                 lists directories and downloads a file, checked
+                                 byte-for-byte via sha256 (see "Verified so far")
 ```
 
 ### Why it's split this way
@@ -139,6 +168,21 @@ electron/                     Electron-specific (DOM + Node lib, its own tsconfi
   `require`/`exports`, which don't exist in a plain `<script>` tag (no Node
   integration in that renderer, by design). esbuild inlines every import
   (including `zod`) into one dependency-free IIFE bundle instead.
+- **File listing and downloading are two different IPC shapes on purpose.**
+  `files:list` is `ipcMain.handle`/`invoke` — a single request, a single
+  response, a natural fit for a Promise. Downloading is a stream of events
+  over time (start, N chunks, complete-or-error), so it uses fire-and-forget
+  `send`/`on` instead, matching how `signal` and input events already work.
+- **Only `downloadManager.ts` touches a live `fs.ReadStream`.** Keeping
+  pause/resume/cancel behind one small class (rather than scattering stream
+  state through `main.ts`) is what makes the backpressure logic in
+  `capture.ts` (watch `bufferedAmount`, call `pauseDownload`/`resumeDownload`)
+  safe to reason about — the stream can only be in one of a few known states.
+- **Full filesystem read access is intentional, not an oversight.**
+  `fileSystemBrowser.ts`'s doc comment covers this: the same already-open
+  connection that can browse files can already move the mouse and type,
+  which is a strictly bigger capability. File browsing doesn't raise the
+  threat model, it just uses a permission the connection already has.
 
 ### Accepted risk
 
@@ -173,6 +217,23 @@ independently queried the real OS cursor position via a separate PowerShell
 
 Both match the requested ratio exactly, confirmed by a tool outside the
 Electron app itself — not by trusting the app's own logs.
+
+**Phase 5:** wrote `electron/test/file-protocol-check.ts`, a Node script
+using `@roamhq/wrtc` to stand in for the phone app (since no mobile emulator
+is available in this environment), and ran it against the real backend and
+real Electron agent:
+
+1. Requested the root listing → got back 5 entries (drives + quick-access
+   folders).
+2. Wrote a 50KB file of random bytes to the OS temp directory, listed that
+   directory over the channel, and confirmed the file appeared with the
+   right name and path.
+3. Requested a download of that file, collected every binary chunk in
+   order, and compared the reassembled bytes against the original —
+   **exact length match and identical SHA-256 hash**.
+
+This confirms the list → download → chunked-transfer protocol works
+end-to-end through the real backend's signaling relay, not just in isolation.
 
 ## Run it
 
@@ -210,11 +271,16 @@ Open `http://localhost:5511/phone-simulator.html`, click **Connect to pc-1**
 — you should see your own screen streamed back within a couple of seconds —
 then try the two "Move cursor" buttons and watch your real mouse jump.
 
+To test file browsing specifically, run (with the backend and
+`npm run electron:start` both running):
+```bash
+npx tsx electron/test/file-protocol-check.ts
+```
+
 ## What's next
 
 **Full keyboard mapping.** `inputEvent.ts`'s `key` field currently must
 already match a `nut-js` `Key` enum member name exactly (e.g. `"A"`,
-`"Enter"`, `"Space"`). Translating from what a real keyboard or the phone
-app's touch keyboard actually sends into that enum is a follow-up — the
-React Native app is the next major piece of work and will define what shape
-key names actually arrive in.
+`"Enter"`, `"Space"`). Translating from what the [React Native app](../mobile-app)
+actually sends into that enum is a follow-up now that the app defines what
+shape key names arrive in.

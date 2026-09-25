@@ -20,6 +20,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@roamhq/wrtc": "^0.10.0",
     "@types/node": "^22.5.4",
     "@types/ws": "^8.5.12",
     "electron": "^44.4.5",

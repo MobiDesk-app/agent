@@ -1,6 +1,14 @@
 import { isSignalPayload } from "../../src/rtc/signalPayload";
 import type { IceCandidateInit } from "../../src/rtc/signalPayload";
 import { inputEventSchema } from "../../src/rtc/inputEvent";
+import { fileRequestSchema } from "../../src/rtc/fileProtocol";
+import type { FileResponse, FileEntry } from "../../src/rtc/fileProtocol";
+
+type DownloadEvent =
+  | { kind: "start"; requestId: string; name: string; size: number }
+  | { kind: "chunk"; requestId: string; data: Uint8Array }
+  | { kind: "error"; requestId: string; message: string }
+  | { kind: "complete"; requestId: string };
 
 // Exposed by electron/preload.ts via contextBridge — this is the *only*
 // bridge into the main process; no Node/Electron APIs otherwise.
@@ -9,6 +17,12 @@ interface RelayBridge {
   onIncomingSignal: (callback: (message: { from: string; payload: unknown }) => void) => void;
   sendOutgoingSignal: (target: string, payload: unknown) => void;
   sendInputEvent: (event: unknown) => void;
+  listFiles: (dirPath: string | null) => Promise<unknown>;
+  requestDownload: (requestId: string, filePath: string) => void;
+  pauseDownload: (requestId: string) => void;
+  resumeDownload: (requestId: string) => void;
+  cancelDownload: (requestId: string) => void;
+  onDownloadEvent: (callback: (event: DownloadEvent) => void) => void;
 }
 declare const window: Window & { relay: RelayBridge };
 
@@ -26,9 +40,89 @@ interface DesktopCaptureConstraints {
 
 const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
+const BUFFERED_AMOUNT_HIGH = 1024 * 1024; // pause reading the file above 1MB queued
+const BUFFERED_AMOUNT_LOW = 256 * 1024; // resume once the queue drains below this
+
 let activePeerId: string | null = null;
 let peerConnection: RTCPeerConnection | null = null;
 let captureStream: MediaStream | null = null;
+let filesChannel: RTCDataChannel | null = null;
+
+function sendFileResponse(response: FileResponse): void {
+  filesChannel?.send(JSON.stringify(response));
+}
+
+function setupFilesChannel(channel: RTCDataChannel): void {
+  filesChannel = channel;
+  channel.bufferedAmountLowThreshold = BUFFERED_AMOUNT_LOW;
+
+  channel.onmessage = (msgEvent) => {
+    let json: unknown;
+    try {
+      json = JSON.parse(msgEvent.data);
+    } catch {
+      return console.warn("[capture] dropped malformed file-request JSON");
+    }
+    const result = fileRequestSchema.safeParse(json);
+    if (!result.success) {
+      return console.warn("[capture] dropped file request that failed validation:", json);
+    }
+    void handleFileRequest(result.data);
+  };
+}
+
+async function handleFileRequest(request: ReturnType<typeof fileRequestSchema.parse>): Promise<void> {
+  if (request.type === "list") {
+    try {
+      // main.ts (our own trusted code) guarantees this shape; only `path`
+      // above came from the network and needed validation.
+      const entries = (await window.relay.listFiles(request.path)) as FileEntry[];
+      sendFileResponse({ type: "list-result", requestId: request.requestId, path: request.path, entries });
+    } catch (err) {
+      sendFileResponse({
+        type: "list-error",
+        requestId: request.requestId,
+        message: err instanceof Error ? err.message : "failed to list directory",
+      });
+    }
+    return;
+  }
+  if (request.type === "download") {
+    window.relay.requestDownload(request.requestId, request.path);
+    return;
+  }
+  if (request.type === "cancel-download") {
+    window.relay.cancelDownload(request.requestId);
+  }
+}
+
+// Registered once — download events are forwarded to whichever files
+// channel is currently open, applying backpressure from the data channel's
+// own send buffer instead of reading the whole file into memory up front.
+window.relay.onDownloadEvent((event) => {
+  if (!filesChannel) return;
+  switch (event.kind) {
+    case "start":
+      sendFileResponse({ type: "download-start", requestId: event.requestId, name: event.name, size: event.size });
+      return;
+    case "chunk": {
+      // Re-wrapped to satisfy lib.dom's ArrayBufferView<ArrayBuffer> overload
+      // (event.data's backing buffer type is ArrayBufferLike, not ArrayBuffer).
+      filesChannel.send(new Uint8Array(event.data));
+      if (filesChannel.bufferedAmount > BUFFERED_AMOUNT_HIGH) {
+        window.relay.pauseDownload(event.requestId);
+        filesChannel.onbufferedamountlow = () => window.relay.resumeDownload(event.requestId);
+      }
+      return;
+    }
+    case "error":
+      sendFileResponse({ type: "download-error", requestId: event.requestId, message: event.message });
+      return;
+    case "complete":
+      sendFileResponse({ type: "download-complete", requestId: event.requestId });
+      return;
+  }
+});
 
 async function getCaptureStream(): Promise<MediaStream> {
   if (captureStream) return captureStream;
@@ -49,7 +143,28 @@ async function getCaptureStream(): Promise<MediaStream> {
 function resetPeerConnection(): void {
   peerConnection?.close();
   peerConnection = null;
+  filesChannel = null;
   activePeerId = null;
+}
+
+function setupInputChannel(channel: RTCDataChannel): void {
+  // This is the real trust boundary for input events — they come straight
+  // off the wire from whatever's on the other end of the connection — so
+  // they're schema-validated here before ever reaching the main process or
+  // the OS.
+  channel.onmessage = (msgEvent) => {
+    let json: unknown;
+    try {
+      json = JSON.parse(msgEvent.data);
+    } catch {
+      return console.warn("[capture] dropped malformed input event JSON");
+    }
+    const result = inputEventSchema.safeParse(json);
+    if (!result.success) {
+      return console.warn("[capture] dropped input event that failed validation:", json);
+    }
+    window.relay.sendInputEvent(result.data);
+  };
 }
 
 /**
@@ -77,24 +192,17 @@ async function handleOffer(from: string, sdp: string): Promise<void> {
     });
   };
 
-  // The phone opens this channel to send mouse/keyboard events. This is the
-  // real trust boundary for input events — they come straight off the wire
-  // from whatever's on the other end of the connection — so they're
-  // schema-validated here before ever reaching the main process or the OS.
+  // The phone opens two data channels alongside the video track: "input"
+  // for mouse/keyboard, "files" for browsing/downloading. Branch on label
+  // rather than assuming which one arrives first.
   pc.ondatachannel = (event) => {
-    event.channel.onmessage = (msgEvent) => {
-      let json: unknown;
-      try {
-        json = JSON.parse(msgEvent.data);
-      } catch {
-        return console.warn("[capture] dropped malformed input event JSON");
-      }
-      const result = inputEventSchema.safeParse(json);
-      if (!result.success) {
-        return console.warn("[capture] dropped input event that failed validation:", json);
-      }
-      window.relay.sendInputEvent(result.data);
-    };
+    if (event.channel.label === "input") {
+      setupInputChannel(event.channel);
+    } else if (event.channel.label === "files") {
+      setupFilesChannel(event.channel);
+    } else {
+      console.warn(`[capture] ignoring data channel with unknown label "${event.channel.label}"`);
+    }
   };
 
   const stream = await getCaptureStream();

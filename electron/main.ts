@@ -7,6 +7,8 @@ import { Agent } from "../src/agent";
 import { inputEventSchema } from "../src/rtc/inputEvent";
 import { createElectronRtcHandler } from "./electronRtcHandler";
 import { applyInputEvent } from "./inputInjector";
+import { listRoots, listDirectory } from "./fileSystemBrowser";
+import { DownloadManager } from "./downloadManager";
 
 // This process never shows a window to the user — it's a background agent.
 // The single hidden BrowserWindow exists only because screen capture and
@@ -34,6 +36,7 @@ function createCaptureWindow(): BrowserWindow {
 
 app.whenReady().then(() => {
   captureWindow = createCaptureWindow();
+  const downloads = new DownloadManager();
 
   const signaling = new SignalingClient({
     url: config.backendUrl,
@@ -81,6 +84,30 @@ app.whenReady().then(() => {
       console.error("[input] failed to apply input event:", err instanceof Error ? err.message : err);
     });
   });
+
+  // File browsing: "list" is request/response (invoke). Full filesystem
+  // read access here is intentional, not an oversight — see
+  // fileSystemBrowser.ts's doc comment.
+  ipcMain.handle("files:list", async (_event, dirPath: string | null) => {
+    return dirPath === null ? listRoots() : listDirectory(dirPath);
+  });
+
+  // Download is a stream of events over time, not a single response, so it
+  // uses fire-and-forget send/on rather than invoke/handle. Chunks are
+  // converted to Uint8Array — Electron IPC's structured clone doesn't
+  // reliably round-trip a Node Buffer subclass.
+  ipcMain.on("files:download-request", (_event, requestId: string, filePath: string) => {
+    downloads.start(requestId, filePath, {
+      onStart: (name, size) => captureWindow.webContents.send("files:download-start", requestId, name, size),
+      onChunk: (chunk) =>
+        captureWindow.webContents.send("files:download-chunk", requestId, Uint8Array.from(chunk)),
+      onError: (message) => captureWindow.webContents.send("files:download-error", requestId, message),
+      onComplete: () => captureWindow.webContents.send("files:download-complete", requestId),
+    });
+  });
+  ipcMain.on("files:download-pause", (_event, requestId: string) => downloads.pause(requestId));
+  ipcMain.on("files:download-resume", (_event, requestId: string) => downloads.resume(requestId));
+  ipcMain.on("files:download-cancel", (_event, requestId: string) => downloads.cancel(requestId));
 
   // Keep running with no windows open — this is a background agent, not a
   // normal app the user quits by closing a window.
