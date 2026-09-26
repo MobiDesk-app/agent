@@ -2,8 +2,10 @@
 
 The background process that runs on your home PC. It connects to the
 [backend](../backend), reports what's on your LAN, streams your screen over
-WebRTC, applies remote mouse/keyboard input to the real OS, and — as of
-Phase 5 — lets a connected phone browse and download files.
+WebRTC, applies remote mouse/keyboard input to the real OS, lets a connected
+phone browse and download files, and — as of Phase 6 — can be packaged into
+a real installable app (`.exe`/`.dmg`/`.AppImage`) instead of needing
+`npm`/`node` on the target PC.
 
 ## What's built so far
 
@@ -43,6 +45,26 @@ Phase 5 — lets a connected phone browse and download files.
 - Only one download runs at a time, matching the existing single-viewer
   limitation elsewhere in this project
 
+**Phase 6 — packaging as a real installable app:**
+- `npm run dist` (`electron-builder`) produces a real installer — NSIS
+  `.exe` on Windows, `.dmg` on macOS, `.AppImage` on Linux — so the PC being
+  controlled just needs the built app, not a clone of this repo or Node
+  installed
+- Config moved off `.env`/`dotenv` for the Electron build specifically: a
+  packaged app has no predictable working directory, and the common
+  "portable" installer format actually runs from a temp extraction, not the
+  folder the user downloaded it into, so nothing colocated with the `.exe`
+  survives to runtime. `electron/appConfig.ts` reads/writes
+  `config.json` in Electron's standard per-user data directory instead
+  (`app.getPath("userData")`), which is stable regardless of installer
+  format
+- First run with no config file: writes a template `config.json` there and
+  shows a native dialog telling the user exactly where to edit it, then
+  exits, rather than crashing on a missing `BACKEND_URL`
+- `@nut-tree-fork/nut-js`'s native binary is rebuilt for Electron's Node ABI
+  automatically via `electron-builder install-app-deps`, wired as this
+  package's `postinstall` script
+
 ## What's NOT built yet
 
 - Full keyboard key-name mapping (see "Not done yet" below)
@@ -50,7 +72,9 @@ Phase 5 — lets a connected phone browse and download files.
   session rather than running both — logged as a warning when it happens)
 - Concurrent downloads (a second download request while one is active gets
   a "busy" `download-error`)
-- Auto-start on login, tray icon, packaging/installer
+- Auto-start on login, tray icon
+- Code signing — the built installer is unsigned, so Windows SmartScreen
+  and macOS Gatekeeper will warn on a fresh machine (see "Run it")
 
 ## Architecture
 
@@ -92,11 +116,16 @@ src/                          framework-agnostic core (no Electron/DOM types)
                                  stub). Useful for testing/headless boxes with no display.
 
 electron/                     Electron-specific (DOM + Node lib, its own tsconfig)
-  main.ts                      real entrypoint (`npm run electron:start`). Builds the
-                                 same Agent core as index.ts, wires a real
+  main.ts                      real entrypoint (`npm run electron:start`, or the
+                                 packaged app). Loads config via appConfig.ts, builds
+                                 the same Agent core as index.ts, wires a real
                                  RtcSessionHandler that forwards signals into the hidden
                                  renderer, and applies validated input events via
                                  inputInjector.ts
+  appConfig.ts                  loads config.json from Electron's per-user data
+                                 directory (not .env — see Phase 6 above for why),
+                                 writing a first-run template and showing a dialog
+                                 telling the user where to edit it if none exists yet
   electronRtcHandler.ts         implements RtcSessionHandler for Electron: main has
                                  no WebRTC stack, so it forwards signal messages via
                                  webContents.send to the renderer that does
@@ -235,6 +264,20 @@ real Electron agent:
 This confirms the list → download → chunked-transfer protocol works
 end-to-end through the real backend's signaling relay, not just in isolation.
 
+**Phase 6:** ran `npm run dist` for real and got back an actual NSIS
+installer plus an unpacked build. Rather than run the installer (which
+would modify this machine's Program Files/registry for a test), launched
+the unpacked `release/win-unpacked/Home Relay Agent.exe` directly — the
+real packaged binary, not `npx electron .` or any dev tooling:
+
+1. First run with no `config.json` yet: it created
+   `%APPDATA%\home-relay-agent\config.json` with the documented template
+   and exited, exactly as designed.
+2. Restarted the real backend and relaunched the same packaged `.exe` —
+   it authenticated as `pc-1` and reported a real LAN scan, confirmed by
+   reading the backend's `data/devices.json` afterward and seeing the
+   report land there.
+
 ## Run it
 
 **Phase 2 mode (LAN reporting only, no screen share, no GUI needed):**
@@ -258,6 +301,28 @@ Type-check everything (src/ with Node lib, electron/ with Node+DOM lib):
 ```bash
 npm run typecheck
 ```
+
+**Packaging a real installable app (Phase 6):**
+```bash
+npm run dist   # builds electron/ + src/, then runs electron-builder
+```
+Produces, under `release/`:
+- Windows: `Home Relay Agent Setup <version>.exe` (NSIS installer)
+- macOS: a `.dmg` (run on a Mac, or via a cross-build CI service)
+- Linux: a `.AppImage`
+
+**First run on the target PC:** the app writes
+`config.json` to its per-user data directory (`%APPDATA%\home-relay-agent\`
+on Windows, `~/Library/Application Support/home-relay-agent/` on macOS,
+`~/.config/home-relay-agent/` on Linux) and shows a dialog with that exact
+path, then exits. Edit that file — set `backendUrl`, `authToken` (must match
+the backend's `AUTH_TOKEN`), and a unique `deviceId` — and launch it again.
+
+The installer is **unsigned** (no code-signing certificate configured), so
+Windows SmartScreen / macOS Gatekeeper will show an "unknown publisher"
+warning on a fresh machine — click through it ("More info" → "Run anyway"
+on Windows) or set up a real certificate in `package.json`'s `build.win`/
+`build.mac` config if this needs to go to people other than yourself.
 
 ### Manually testing the full pipeline
 

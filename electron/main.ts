@@ -1,6 +1,6 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain } from "electron";
 import path from "node:path";
-import { config } from "../src/config/env";
+import { loadConfigOrPrompt } from "./appConfig";
 import { SignalingClient } from "../src/signaling/signalingClient";
 import { scanLan } from "../src/network/arpScanner";
 import { Agent } from "../src/agent";
@@ -35,6 +35,12 @@ function createCaptureWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
+  const config = loadConfigOrPrompt();
+  if (!config) {
+    app.quit();
+    return;
+  }
+
   captureWindow = createCaptureWindow();
   const downloads = new DownloadManager();
 

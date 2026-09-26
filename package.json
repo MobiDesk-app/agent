@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "electron:build": "tsc -p tsconfig.electron.json && node scripts/copy-renderer-assets.js && npm run electron:bundle-renderer",
     "electron:bundle-renderer": "esbuild electron/renderer/capture.ts --bundle --format=iife --outfile=dist-electron/electron/renderer/capture.js",
-    "electron:start": "npm run electron:build && electron ."
+    "electron:start": "npm run electron:build && electron .",
+    "dist": "npm run electron:build && electron-builder",
+    "postinstall": "electron-builder install-app-deps"
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
@@ -24,8 +26,33 @@
     "@types/node": "^22.5.4",
     "@types/ws": "^8.5.12",
     "electron": "^44.4.5",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2",
     "tsx": "^4.19.1",
     "typescript": "^5.6.2"
+  },
+  "build": {
+    "appId": "com.homerelay.agent",
+    "productName": "Home Relay Agent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": ["nsis"]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": ["dmg"]
+    },
+    "linux": {
+      "target": ["AppImage"]
+    }
   }
 }
