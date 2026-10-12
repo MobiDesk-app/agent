@@ -4,8 +4,10 @@
  * React Native app with a Node WebRTC client (@roamhq/wrtc) instead of a
  * browser, since a mobile emulator isn't available in this environment.
  *
- * Usage: backend and `npm run electron:start` must already be running.
- *   npx tsx electron/test/file-protocol-check.ts
+ * Usage: backend and `npm run electron:start` must already be running, and
+ * the agent linked to your account. SESSION_TOKEN is a sign-in token (the
+ * "token" returned by POST /api/auth/login) and PC_ID the linked PC's id.
+ *   SESSION_TOKEN=... PC_ID=pc_... npx tsx electron/test/file-protocol-check.ts
  */
 import "dotenv/config";
 import fs from "node:fs";
@@ -15,9 +17,13 @@ import crypto from "node:crypto";
 import WebSocket from "ws";
 import wrtc from "@roamhq/wrtc";
 
-const TOKEN = process.env.AUTH_TOKEN ?? "change-me-to-a-long-random-string";
-const TARGET = process.env.DEVICE_ID ?? "pc-1";
-const BACKEND_URL = process.env.BACKEND_URL ?? "ws://localhost:8080";
+const SESSION_TOKEN = process.env.SESSION_TOKEN ?? "";
+const TARGET = process.env.PC_ID ?? "";
+const BACKEND_URL = process.env.WS_URL ?? "ws://localhost:8080";
+if (!SESSION_TOKEN || !TARGET) {
+  console.error("Set SESSION_TOKEN and PC_ID (see the comment at the top of this file).");
+  process.exit(1);
+}
 
 const TEST_FILE_SIZE = 50 * 1024; // spans several 16KB chunks
 const testFilePath = path.join(os.tmpdir(), "home-relay-file-protocol-check.bin");
@@ -52,7 +58,7 @@ async function main(): Promise<void> {
 
   ws.on("open", () => {
     console.log("ws open, authenticating");
-    ws.send(JSON.stringify({ type: "auth", token: TOKEN, deviceId: "file-test-client", role: "app" }));
+    ws.send(JSON.stringify({ type: "auth", role: "app", sessionToken: SESSION_TOKEN }));
   });
 
   ws.on("message", async (raw: Buffer) => {

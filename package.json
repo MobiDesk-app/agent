@@ -45,6 +45,7 @@
       "target": ["nsis"]
     },
     "nsis": {
+      "artifactName": "Home-Relay-Agent-Setup.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },

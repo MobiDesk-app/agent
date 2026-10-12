@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>Link this PC — Home Relay</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0; padding: 32px 28px; background: #0c0d10; color: #f2f4f8;
+        font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        display: flex; flex-direction: column; min-height: 100vh; user-select: none;
+      }
+      h1 { font-size: 20px; margin: 0 0 6px; }
+      .muted { color: #8a93a3; }
+      .card { margin-top: 24px; background: #171b22; border: 1px solid #262b35; border-radius: 16px; padding: 24px; text-align: center; }
+      .code { font: 600 44px/1 ui-monospace, "Cascadia Mono", Menlo, monospace; letter-spacing: 6px; margin: 8px 0 12px; user-select: text; }
+      .timer { font-size: 12px; color: #6b7280; }
+      ol { padding-left: 18px; margin: 20px 0 0; color: #b7bec9; }
+      li { margin: 6px 0; }
+      .ok { color: #3ee6ab; font-size: 18px; font-weight: 600; }
+      .warn { color: #f2b36b; }
+      .spinner { width: 28px; height: 28px; border: 3px solid #262b35; border-top-color: #5b8def; border-radius: 50%; margin: 12px auto; animation: spin 0.9s linear infinite; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .foot { margin-top: auto; padding-top: 16px; font-size: 12px; color: #6b7280; word-break: break-all; }
+    </style>
+  </head>
+  <body>
+    <h1>Link this PC to your account</h1>
+    <div class="muted" id="name"></div>
+
+    <div class="card" id="card"><div class="spinner"></div><div class="muted">Getting a code…</div></div>
+
+    <ol id="steps">
+      <li>Open Home Relay on your phone or in your browser and sign in.</li>
+      <li>Press <b>Link a PC</b>.</li>
+      <li>Type the code above.</li>
+    </ol>
+
+    <div class="foot" id="server"></div>
+
+    <script>
+      const card = document.getElementById("card");
+      let expiresAt = 0;
+      let timer = null;
+
+      function render(update) {
+        document.getElementById("name").textContent = "This PC will appear as “" + update.deviceName + "”.";
+        document.getElementById("server").textContent = "Server: " + update.serverUrl;
+        clearInterval(timer);
+
+        if (update.state === "code") {
+          const code = update.code.slice(0, 3) + " " + update.code.slice(3);
+          expiresAt = Date.parse(update.expiresAt);
+          card.innerHTML = '<div class="muted">Your link code</div><div class="code"></div><div class="timer"></div>';
+          card.querySelector(".code").textContent = code;
+          const tick = () => {
+            const s = Math.max(0, Math.round((expiresAt - Date.now()) / 1000));
+            card.querySelector(".timer").textContent = "Expires in " + Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0") + " — a new code appears automatically.";
+          };
+          tick();
+          timer = setInterval(tick, 1000);
+        } else if (update.state === "offline") {
+          card.innerHTML = '<div class="warn">Can’t reach the server</div><div class="muted" style="margin-top:6px">Check your internet connection. Retrying…</div>';
+        } else if (update.state === "paired") {
+          document.getElementById("steps").style.display = "none";
+          card.innerHTML = '<div class="ok">✓ Linked!</div><div class="muted" style="margin-top:6px">Home Relay is now running in the background.</div>';
+        } else {
+          card.innerHTML = '<div class="spinner"></div><div class="muted">Getting a code…</div>';
+        }
+      }
+
+      window.pairing.onUpdate(render);
+    </script>
+  </body>
+</html>

@@ -46,7 +46,7 @@ export type ServerMessage = z.infer<typeof serverMessageSchema>;
 // ---------------------------------------------------------------------------
 
 export type AgentMessage =
-  | { type: "auth"; token: string; deviceId: string; role: "pc"; name: string }
+  | { type: "auth"; role: "pc"; deviceId: string; secret: string; name: string }
   | { type: "report_lan_devices"; devices: LanDevice[] }
   | { type: "signal"; target: string; payload: unknown }
   | { type: "ping" };

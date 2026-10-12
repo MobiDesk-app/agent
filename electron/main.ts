@@ -1,6 +1,9 @@
 import { app, BrowserWindow, desktopCapturer, ipcMain } from "electron";
 import path from "node:path";
-import { loadConfigOrPrompt } from "./appConfig";
+import { loadConfig, saveCredentials } from "./appConfig";
+import type { AppConfig } from "./appConfig";
+import { runPairingWindow } from "./pairingWindow";
+import { toWebSocketUrl } from "../src/pairing/pairingClient";
 import { SignalingClient } from "../src/signaling/signalingClient";
 import { scanLan } from "../src/network/arpScanner";
 import { Agent } from "../src/agent";
@@ -15,6 +18,12 @@ import { DownloadManager } from "./downloadManager";
 // WebRTC require a renderer (Chromium) context; the main process itself has
 // neither a DOM nor a WebRTC stack.
 let captureWindow: BrowserWindow;
+let signaling: SignalingClient | null = null;
+let agent: Agent | null = null;
+
+// Only one copy should run: two agents with the same credentials would keep
+// replacing each other's connection.
+if (!app.requestSingleInstanceLock()) app.quit();
 
 function createCaptureWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -34,30 +43,53 @@ function createCaptureWindow(): BrowserWindow {
   return win;
 }
 
-app.whenReady().then(() => {
-  const config = loadConfigOrPrompt();
-  if (!config) {
-    app.quit();
-    return;
+/**
+ * Makes sure this PC is linked to an account (showing the pairing window if
+ * not), then connects. Runs again if the PC is later unlinked from the app.
+ */
+async function linkAndStart(config: AppConfig): Promise<void> {
+  let credentials = config.credentials;
+  if (!credentials) {
+    credentials = await runPairingWindow(config.serverUrl, config.deviceName);
+    if (!credentials) {
+      app.quit(); // user closed the pairing window
+      return;
+    }
+    saveCredentials(credentials);
   }
 
-  captureWindow = createCaptureWindow();
-  const downloads = new DownloadManager();
-
-  const signaling = new SignalingClient({
-    url: config.backendUrl,
-    token: config.authToken,
-    deviceId: config.deviceId,
+  signaling = new SignalingClient({
+    url: toWebSocketUrl(config.serverUrl),
+    deviceId: credentials.deviceId,
+    secret: credentials.deviceSecret,
     name: config.deviceName,
   });
 
-  const agent = new Agent({
+  agent = new Agent({
     signaling,
     scanLan,
     handleSignal: createElectronRtcHandler(() => captureWindow),
     scanIntervalMs: config.scanIntervalMs,
+    onUnauthorized: () => {
+      agent?.stop();
+      agent = null;
+      signaling = null;
+      saveCredentials(null);
+      void linkAndStart({ ...config, credentials: null });
+    },
   });
   agent.start();
+}
+
+app.on("second-instance", () => {
+  // Nothing to focus when already linked (it runs in the background).
+});
+
+app.whenReady().then(() => {
+  const config = loadConfig();
+
+  captureWindow = createCaptureWindow();
+  const downloads = new DownloadManager();
 
   // Renderer asks main for a screen source id because desktopCapturer is
   // main-process-only; it then uses that id in its own getUserMedia call.
@@ -73,7 +105,7 @@ app.whenReady().then(() => {
 
   // Renderer produces answers/ICE candidates; only main talks to the backend.
   ipcMain.on("rtc:outgoing-signal", (_event, target: string, payload: unknown) => {
-    signaling.send({ type: "signal", target, payload });
+    signaling?.send({ type: "signal", target, payload });
   });
 
   // Renderer forwards data-channel input events here because nut-js's
@@ -118,4 +150,6 @@ app.whenReady().then(() => {
   // Keep running with no windows open — this is a background agent, not a
   // normal app the user quits by closing a window.
   app.on("window-all-closed", () => {});
+
+  void linkAndStart(config);
 });

@@ -283,7 +283,7 @@ real packaged binary, not `npx electron .` or any dev tooling:
 **Phase 2 mode (LAN reporting only, no screen share, no GUI needed):**
 ```bash
 npm install
-cp .env.example .env   # AUTH_TOKEN must match the backend's .env exactly
+cp .env.example .env   # set SERVER_URL; the first run prints a link code
 npm run dev             # runs src/index.ts, restarts on change
 ```
 
@@ -311,12 +311,18 @@ Produces, under `release/`:
 - macOS: a `.dmg` (run on a Mac, or via a cross-build CI service)
 - Linux: a `.AppImage`
 
-**First run on the target PC:** the app writes
-`config.json` to its per-user data directory (`%APPDATA%\home-relay-agent\`
-on Windows, `~/Library/Application Support/home-relay-agent/` on macOS,
-`~/.config/home-relay-agent/` on Linux) and shows a dialog with that exact
-path, then exits. Edit that file — set `backendUrl`, `authToken` (must match
-the backend's `AUTH_TOKEN`), and a unique `deviceId` — and launch it again.
+**First run on the target PC:** the app opens a small window showing a
+6-digit link code. Sign in to the web or phone app, press **Link a PC**, and
+type the code. The window closes and the agent keeps running in the
+background. Its device id and secret are saved in `config.json` in the
+per-user data directory (`%APPDATA%\home-relay-agent\` on Windows,
+`~/Library/Application Support/home-relay-agent/` on macOS), with the secret
+encrypted by the OS (DPAPI / Keychain via Electron `safeStorage`). If the PC
+is unlinked from the app, the link window appears again.
+
+Set the server address for the installers you ship with `DEFAULT_SERVER_URL`
+in `electron/appConfig.ts` (or per machine with `"serverUrl"` in
+`config.json`).
 
 The installer is **unsigned** (no code-signing certificate configured), so
 Windows SmartScreen / macOS Gatekeeper will show an "unknown publisher"

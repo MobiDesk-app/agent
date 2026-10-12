@@ -1,73 +1,99 @@
-import { app, dialog } from "electron";
+import { app, safeStorage } from "electron";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import type { Config } from "../src/config/env";
+import { normalizeServerUrl } from "../src/pairing/pairingClient";
+import type { PairingCredentials } from "../src/pairing/pairingClient";
+
+// The server every installed copy talks to. Change this before building
+// the installer for real users (e.g. "https://relay.example.com"); it can
+// still be overridden per machine with "serverUrl" in config.json.
+export const DEFAULT_SERVER_URL = "https://linkobackend.ghannemhazem.com";
 
 const CONFIG_FILENAME = "config.json";
 
-const TEMPLATE = {
-  backendUrl: "ws://localhost:8080",
-  authToken: "change-me-to-a-long-random-string",
-  deviceId: "pc-1",
-  deviceName: "My PC",
-  scanIntervalMs: 30000,
-};
+export interface AppConfig {
+  serverUrl: string;
+  deviceName: string;
+  scanIntervalMs: number;
+  credentials: PairingCredentials | null;
+}
+
+interface StoredConfig {
+  serverUrl?: string;
+  backendUrl?: string; // pre-accounts name for serverUrl
+  deviceName?: string;
+  scanIntervalMs?: number;
+  deviceId?: string;
+  /** base64 of the OS-encrypted secret (DPAPI on Windows, Keychain on macOS). */
+  deviceSecretEncrypted?: string;
+  /** Only used where the OS offers no encryption (some Linux setups). */
+  deviceSecret?: string;
+}
 
 function configPath(): string {
   return path.join(app.getPath("userData"), CONFIG_FILENAME);
 }
 
-/**
- * A packaged build has no predictable working directory and no reliable
- * place next to the executable to keep a `.env` file — the common
- * "portable" installer format actually runs from a temp extraction, not
- * the folder the user downloaded it into, so anything colocated with the
- * .exe disappears at runtime. Config lives in Electron's standard per-user
- * data directory instead (works the same regardless of installer format),
- * and on first run this writes a template there and tells the user where
- * to edit it, rather than crashing on a missing value.
- */
-export function loadConfigOrPrompt(): Config | null {
-  const file = configPath();
-
-  if (!fs.existsSync(file)) {
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(TEMPLATE, null, 2));
-    dialog.showErrorBox(
-      "Home Relay Agent — first-time setup",
-      `Created a config file for you at:\n\n${file}\n\n` +
-        "Edit it with your backend's URL and auth token, then restart this app."
-    );
-    return null;
-  }
-
-  let raw: Record<string, unknown>;
+function readStored(): StoredConfig {
   try {
-    raw = JSON.parse(fs.readFileSync(file, "utf8"));
+    return JSON.parse(fs.readFileSync(configPath(), "utf8")) as StoredConfig;
   } catch {
-    dialog.showErrorBox(
-      "Home Relay Agent — invalid config",
-      `${file} isn't valid JSON. Fix it or delete it to get a fresh template, then restart.`
-    );
-    return null;
+    return {};
   }
+}
 
-  const backendUrl = raw.backendUrl;
-  const authToken = raw.authToken;
-  const deviceId = raw.deviceId;
-  if (typeof backendUrl !== "string" || typeof authToken !== "string" || typeof deviceId !== "string") {
-    dialog.showErrorBox(
-      "Home Relay Agent — invalid config",
-      `${file} is missing backendUrl, authToken, or deviceId. Check it against the template and restart.`
-    );
-    return null;
+function writeStored(stored: StoredConfig): void {
+  const file = configPath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(stored, null, 2), { mode: 0o600 });
+}
+
+/**
+ * Config lives in Electron's per-user data directory (a packaged app has no
+ * reliable folder next to its .exe). No manual editing is needed: the
+ * server address is built in and the device credentials are filled in by
+ * the pairing window.
+ */
+export function loadConfig(): AppConfig {
+  const stored = readStored();
+  let credentials: PairingCredentials | null = null;
+
+  if (stored.deviceId && stored.deviceSecretEncrypted && safeStorage.isEncryptionAvailable()) {
+    try {
+      const secret = safeStorage.decryptString(Buffer.from(stored.deviceSecretEncrypted, "base64"));
+      credentials = { deviceId: stored.deviceId, deviceSecret: secret };
+    } catch {
+      credentials = null; // encrypted by another OS user / machine — pair again
+    }
+  } else if (stored.deviceId && stored.deviceSecret) {
+    credentials = { deviceId: stored.deviceId, deviceSecret: stored.deviceSecret };
   }
 
   return {
-    backendUrl,
-    authToken,
-    deviceId,
-    deviceName: typeof raw.deviceName === "string" ? raw.deviceName : deviceId,
-    scanIntervalMs: Number(raw.scanIntervalMs ?? 30_000),
+    serverUrl: normalizeServerUrl(stored.serverUrl ?? stored.backendUrl ?? DEFAULT_SERVER_URL),
+    deviceName: stored.deviceName ?? os.hostname(),
+    scanIntervalMs: Number(stored.scanIntervalMs ?? 30_000),
+    credentials,
   };
+}
+
+export function saveCredentials(credentials: PairingCredentials | null): void {
+  const stored = readStored();
+  delete stored.deviceId;
+  delete stored.deviceSecret;
+  delete stored.deviceSecretEncrypted;
+  delete stored.backendUrl;
+  // Old shared-token fields from before accounts existed.
+  delete (stored as Record<string, unknown>).authToken;
+
+  if (credentials) {
+    stored.deviceId = credentials.deviceId;
+    if (safeStorage.isEncryptionAvailable()) {
+      stored.deviceSecretEncrypted = safeStorage.encryptString(credentials.deviceSecret).toString("base64");
+    } else {
+      stored.deviceSecret = credentials.deviceSecret;
+    }
+  }
+  writeStored(stored);
 }

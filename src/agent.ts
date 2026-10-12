@@ -7,6 +7,8 @@ export interface AgentDeps {
   scanLan: () => Promise<LanDevice[]>;
   handleSignal: RtcSessionHandler;
   scanIntervalMs: number;
+  /** Called when the backend says this PC's credentials are gone (unlinked). */
+  onUnauthorized?: () => void;
 }
 
 /**
@@ -22,6 +24,11 @@ export class Agent {
     this.deps.signaling.on("signal", (message) => this.deps.handleSignal(message));
     this.deps.signaling.on("error", (message) => console.error(`[signaling] ${message}`));
     this.deps.signaling.on("disconnected", () => this.onDisconnected());
+    this.deps.signaling.on("unauthorized", () => {
+      console.warn("[agent] this PC is no longer linked to an account");
+      this.stopScanning();
+      this.deps.onUnauthorized?.();
+    });
   }
 
   start(): void {

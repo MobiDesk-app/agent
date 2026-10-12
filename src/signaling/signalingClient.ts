@@ -8,16 +8,21 @@ const MAX_RECONNECT_DELAY_MS = 30_000;
 
 export interface SignalingClientOptions {
   url: string;
-  token: string;
   deviceId: string;
+  secret: string;
   name: string;
 }
+
+/** Backend close code: these credentials are no longer valid (PC was unlinked). */
+const CLOSE_UNAUTHORIZED = 4003;
 
 interface SignalingClientEvents {
   authenticated: [deviceId: string];
   signal: [message: SignalMessage];
   error: [message: string];
   disconnected: [];
+  /** The PC was unlinked from its account — stop and pair again. */
+  unauthorized: [];
 }
 
 /**
@@ -58,16 +63,20 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
       this.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
       this.send({
         type: "auth",
-        token: this.options.token,
-        deviceId: this.options.deviceId,
         role: "pc",
+        deviceId: this.options.deviceId,
+        secret: this.options.secret,
         name: this.options.name,
       });
     });
 
     ws.on("message", (raw: Buffer) => this.handleMessage(raw));
 
-    ws.on("close", () => {
+    ws.on("close", (code: number) => {
+      if (code === CLOSE_UNAUTHORIZED) {
+        this.closedByCaller = true;
+        return void this.emit("unauthorized");
+      }
       this.emit("disconnected");
       if (!this.closedByCaller) this.scheduleReconnect();
     });

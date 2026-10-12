@@ -11,7 +11,7 @@
   </head>
   <body>
     <h2>Phone simulator — manual pipeline test</h2>
-    <button id="connect">Connect to pc-1</button>
+    <button id="connect">Connect</button>
     <button id="move-tl">Move cursor: top-left (10%,10%)</button>
     <button id="move-br">Move cursor: bottom-right (90%,90%)</button>
     <p>Video stream from Electron agent's screen capture:</p>
@@ -25,8 +25,10 @@
         console.log(...args);
       }
 
-      const TOKEN = "change-me-to-a-long-random-string";
-      const TARGET = "pc-1";
+      // Sign in via POST /api/auth/login and paste the returned token, plus
+      // your linked PC's id (from GET /api/pcs), here.
+      const SESSION_TOKEN = "paste-session-token-here";
+      const TARGET = "paste-pc-id-here";
       let pc;
       let inputChannel;
 
@@ -50,7 +52,7 @@
 
         ws.onopen = () => {
           log("ws open, authenticating as phone-sim");
-          ws.send(JSON.stringify({ type: "auth", token: TOKEN, deviceId: "phone-sim", role: "app" }));
+          ws.send(JSON.stringify({ type: "auth", role: "app", sessionToken: SESSION_TOKEN }));
         };
 
         ws.onmessage = async (event) => {
