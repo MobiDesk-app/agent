@@ -23,6 +23,8 @@ interface SignalingClientEvents {
   disconnected: [];
   /** The PC was unlinked from its account — stop and pair again. */
   unauthorized: [];
+  /** End the remote session with this app id, if it's the active one. */
+  revoke: [peer: string];
 }
 
 /**
@@ -67,6 +69,9 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
         deviceId: this.options.deviceId,
         secret: this.options.secret,
         name: this.options.name,
+        // Tells the backend this agent enforces per-viewer permissions, so
+        // shared users (not just the owner) may connect to it.
+        features: ["grants"],
       });
     });
 
@@ -107,6 +112,8 @@ export class SignalingClient extends EventEmitter<SignalingClientEvents> {
         return void this.emit("signal", message);
       case "error":
         return void this.emit("error", `backend error: ${message.message}`);
+      case "revoke":
+        return void this.emit("revoke", message.peer);
       case "pong":
         return; // no-op, keepalive only
     }

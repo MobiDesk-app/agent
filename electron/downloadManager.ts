@@ -72,6 +72,11 @@ export class DownloadManager {
     this.clear(requestId);
   }
 
+  /** Stops whatever is streaming, e.g. because the viewer changed or lost access. */
+  cancelAll(): void {
+    if (this.activeRequestId) this.cancel(this.activeRequestId);
+  }
+
   private clear(requestId: string): void {
     if (this.activeRequestId === requestId) {
       this.activeRequestId = null;

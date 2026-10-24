@@ -12,12 +12,14 @@ import { createElectronRtcHandler } from "./electronRtcHandler";
 import { applyInputEvent } from "./inputInjector";
 import { listRoots, listDirectory } from "./fileSystemBrowser";
 import { DownloadManager } from "./downloadManager";
+import { allowed, endSession, isActivePeer, startSession } from "./sessionGrants";
 
 // This process never shows a window to the user — it's a background agent.
 // The single hidden BrowserWindow exists only because screen capture and
 // WebRTC require a renderer (Chromium) context; the main process itself has
 // neither a DOM nor a WebRTC stack.
 let captureWindow: BrowserWindow;
+const downloads = new DownloadManager();
 let signaling: SignalingClient | null = null;
 let agent: Agent | null = null;
 
@@ -65,10 +67,28 @@ async function linkAndStart(config: AppConfig): Promise<void> {
     name: config.deviceName,
   });
 
+  const forwardToRenderer = createElectronRtcHandler(() => captureWindow);
+  // A new offer starts a new viewer's session with that viewer's grants. A
+  // running download belonged to the previous viewer: stop it, or its
+  // remaining chunks would go to the new one.
+  signaling.on("revoke", (peer) => {
+    if (!isActivePeer(peer)) return;
+    console.log(`[agent] access for ${peer} changed; ending their session`);
+    endSession(peer);
+    downloads.cancelAll();
+    captureWindow.webContents.send("rtc:revoke", peer);
+  });
+
   agent = new Agent({
     signaling,
     scanLan,
-    handleSignal: createElectronRtcHandler(() => captureWindow),
+    handleSignal: (message) => {
+      if ((message.payload as { kind?: unknown } | null)?.kind === "offer") {
+        downloads.cancelAll();
+        startSession(message.from, message.grants);
+      }
+      forwardToRenderer(message);
+    },
     scanIntervalMs: config.scanIntervalMs,
     onUnauthorized: () => {
       agent?.stop();
@@ -89,7 +109,6 @@ app.whenReady().then(() => {
   const config = loadConfig();
 
   captureWindow = createCaptureWindow();
-  const downloads = new DownloadManager();
 
   // Renderer asks main for a screen source id because desktopCapturer is
   // main-process-only; it then uses that id in its own getUserMedia call.
@@ -113,6 +132,7 @@ app.whenReady().then(() => {
   // again even though the renderer already validated it — cheap, and this
   // is still a boundary between two different pieces of code.
   ipcMain.on("rtc:input-event", (_event, raw: unknown) => {
+    if (!allowed("control")) return; // this viewer may watch, not touch
     const result = inputEventSchema.safeParse(raw);
     if (!result.success) {
       console.warn("[input] dropped an invalid input event from renderer");
@@ -127,6 +147,7 @@ app.whenReady().then(() => {
   // read access here is intentional, not an oversight — see
   // fileSystemBrowser.ts's doc comment.
   ipcMain.handle("files:list", async (_event, dirPath: string | null) => {
+    if (!allowed("files")) throw new Error("You don't have permission to browse files on this PC.");
     return dirPath === null ? listRoots() : listDirectory(dirPath);
   });
 
@@ -135,6 +156,10 @@ app.whenReady().then(() => {
   // converted to Uint8Array — Electron IPC's structured clone doesn't
   // reliably round-trip a Node Buffer subclass.
   ipcMain.on("files:download-request", (_event, requestId: string, filePath: string) => {
+    if (!allowed("files")) {
+      captureWindow.webContents.send("files:download-error", requestId, "You don't have permission to download files from this PC.");
+      return;
+    }
     downloads.start(requestId, filePath, {
       onStart: (name, size) => captureWindow.webContents.send("files:download-start", requestId, name, size),
       onChunk: (chunk) =>

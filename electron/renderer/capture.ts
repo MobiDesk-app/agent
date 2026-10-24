@@ -15,8 +15,9 @@ type DownloadEvent =
 interface RelayBridge {
   getPrimaryScreenSource: () => Promise<{ id: string; name: string }>;
   onIncomingSignal: (
-    callback: (message: { from: string; payload: unknown; iceServers?: RTCIceServer[] }) => void
+    callback: (message: { from: string; payload: unknown; iceServers?: RTCIceServer[]; grants?: string[] }) => void
   ) => void;
+  onRevoke: (callback: (peer: string) => void) => void;
   sendOutgoingSignal: (target: string, payload: unknown) => void;
   sendInputEvent: (event: unknown) => void;
   listFiles: (dirPath: string | null) => Promise<unknown>;
@@ -48,6 +49,9 @@ const BUFFERED_AMOUNT_HIGH = 1024 * 1024; // pause reading the file above 1MB qu
 const BUFFERED_AMOUNT_LOW = 256 * 1024; // resume once the queue drains below this
 
 let activePeerId: string | null = null;
+// What the active viewer may do ("screen", "files", "control"), from the
+// backend. main.ts checks the same grants again before touching the OS.
+let activeGrants: ReadonlySet<string> = new Set();
 let peerConnection: RTCPeerConnection | null = null;
 let captureStream: MediaStream | null = null;
 let filesChannel: RTCDataChannel | null = null;
@@ -78,8 +82,15 @@ function setupFilesChannel(channel: RTCDataChannel): void {
     if (!result.success) {
       return console.warn("[capture] dropped file request that failed validation:", json);
     }
+    if (!activeGrants.has("files")) return refuseFileRequest(result.data);
     void handleFileRequest(result.data);
   };
+}
+
+function refuseFileRequest(request: ReturnType<typeof fileRequestSchema.parse>): void {
+  const message = "You don't have permission to use files on this PC.";
+  if (request.type === "list") sendFileResponse({ type: "list-error", requestId: request.requestId, message });
+  else if (request.type === "download") sendFileResponse({ type: "download-error", requestId: request.requestId, message });
 }
 
 async function handleFileRequest(request: ReturnType<typeof fileRequestSchema.parse>): Promise<void> {
@@ -156,6 +167,7 @@ function resetPeerConnection(): void {
   peerConnection = null;
   filesChannel = null;
   activePeerId = null;
+  activeGrants = new Set();
   remoteDescriptionSet = false;
   pendingIceCandidates = [];
 }
@@ -176,6 +188,7 @@ function setupInputChannel(channel: RTCDataChannel): void {
     if (!result.success) {
       return console.warn("[capture] dropped input event that failed validation:", json);
     }
+    if (!activeGrants.has("control")) return; // view-only viewer
     window.relay.sendInputEvent(result.data);
   };
 }
@@ -185,7 +198,7 @@ function setupInputChannel(channel: RTCDataChannel): void {
  * offer (see backend/README.md's signaling sequence), so this is the only
  * entry point that creates a new RTCPeerConnection.
  */
-async function handleOffer(from: string, sdp: string, iceServers: RTCIceServer[]): Promise<void> {
+async function handleOffer(from: string, sdp: string, iceServers: RTCIceServer[], grants: ReadonlySet<string>): Promise<void> {
   // MVP limitation: one viewer at a time. A second phone's offer while
   // another is connected replaces the first rather than running both.
   if (activePeerId && activePeerId !== from) {
@@ -193,6 +206,7 @@ async function handleOffer(from: string, sdp: string, iceServers: RTCIceServer[]
   }
   resetPeerConnection();
   activePeerId = from;
+  activeGrants = grants;
 
   const pc = new RTCPeerConnection({ iceServers });
   peerConnection = pc;
@@ -218,8 +232,12 @@ async function handleOffer(from: string, sdp: string, iceServers: RTCIceServer[]
     }
   };
 
-  const stream = await getCaptureStream();
-  for (const track of stream.getTracks()) pc.addTrack(track, stream);
+  // No "screen" grant: the screen is never captured or sent (the viewer may
+  // still use the files channel if they have "files").
+  if (grants.has("screen")) {
+    const stream = await getCaptureStream();
+    for (const track of stream.getTracks()) pc.addTrack(track, stream);
+  }
 
   await pc.setRemoteDescription({ type: "offer", sdp });
   remoteDescriptionSet = true;
@@ -249,12 +267,21 @@ window.relay.onIncomingSignal((message) => {
   }
   const { payload } = message;
   if (payload.kind === "offer") {
-    void handleOffer(message.from, payload.sdp, message.iceServers ?? FALLBACK_ICE_SERVERS);
+    // No grants = an older backend, which only ever relays the PC's owner.
+    const grants = new Set(message.grants ?? ["screen", "files", "control"]);
+    void handleOffer(message.from, payload.sdp, message.iceServers ?? FALLBACK_ICE_SERVERS, grants);
   } else if (payload.kind === "ice-candidate") {
     void handleIceCandidate(payload.candidate);
   }
   // "answer" is never expected here — the agent only ever answers, it
   // doesn't initiate, so it should never receive one.
+});
+
+// The backend says this viewer's access changed: end their session now.
+window.relay.onRevoke((peer) => {
+  if (peer !== activePeerId) return;
+  console.log(`[capture] session with ${peer} revoked`);
+  resetPeerConnection();
 });
 
 console.log("[capture] renderer ready, waiting for an incoming offer");
