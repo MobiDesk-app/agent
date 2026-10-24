@@ -13,10 +13,19 @@ export const authOkMessageSchema = z.object({
   role: z.enum(["pc", "app"]),
 });
 
+export const iceServerSchema = z.object({
+  urls: z.union([z.string(), z.array(z.string())]),
+  username: z.string().optional(),
+  credential: z.string().optional(),
+});
+
 export const signalMessageSchema = z.object({
   type: z.literal("signal"),
   from: z.string(),
   payload: z.unknown(),
+  // Attached by the backend to offers only: STUN plus, when configured,
+  // short-lived TURN credentials for reaching phones on other networks.
+  iceServers: z.array(iceServerSchema).optional(),
 });
 
 export const errorMessageSchema = z.object({

@@ -6,7 +6,9 @@ contextBridge.exposeInMainWorld("relay", {
   getPrimaryScreenSource: (): Promise<{ id: string; name: string }> =>
     ipcRenderer.invoke("desktop-sources:primary"),
 
-  onIncomingSignal: (callback: (message: { from: string; payload: unknown }) => void): void => {
+  onIncomingSignal: (
+    callback: (message: { from: string; payload: unknown; iceServers?: unknown[] }) => void
+  ): void => {
     ipcRenderer.on("rtc:incoming-signal", (_event, message) => callback(message));
   },
 

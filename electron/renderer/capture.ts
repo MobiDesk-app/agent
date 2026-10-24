@@ -14,7 +14,9 @@ type DownloadEvent =
 // bridge into the main process; no Node/Electron APIs otherwise.
 interface RelayBridge {
   getPrimaryScreenSource: () => Promise<{ id: string; name: string }>;
-  onIncomingSignal: (callback: (message: { from: string; payload: unknown }) => void) => void;
+  onIncomingSignal: (
+    callback: (message: { from: string; payload: unknown; iceServers?: RTCIceServer[] }) => void
+  ) => void;
   sendOutgoingSignal: (target: string, payload: unknown) => void;
   sendInputEvent: (event: unknown) => void;
   listFiles: (dirPath: string | null) => Promise<unknown>;
@@ -38,7 +40,9 @@ interface DesktopCaptureConstraints {
   };
 }
 
-const ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+// Only used if the backend didn't attach ICE servers to the offer (an older
+// backend): direct connections only, no TURN relay.
+const FALLBACK_ICE_SERVERS: RTCIceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
 const BUFFERED_AMOUNT_HIGH = 1024 * 1024; // pause reading the file above 1MB queued
 const BUFFERED_AMOUNT_LOW = 256 * 1024; // resume once the queue drains below this
@@ -181,7 +185,7 @@ function setupInputChannel(channel: RTCDataChannel): void {
  * offer (see backend/README.md's signaling sequence), so this is the only
  * entry point that creates a new RTCPeerConnection.
  */
-async function handleOffer(from: string, sdp: string): Promise<void> {
+async function handleOffer(from: string, sdp: string, iceServers: RTCIceServer[]): Promise<void> {
   // MVP limitation: one viewer at a time. A second phone's offer while
   // another is connected replaces the first rather than running both.
   if (activePeerId && activePeerId !== from) {
@@ -190,7 +194,7 @@ async function handleOffer(from: string, sdp: string): Promise<void> {
   resetPeerConnection();
   activePeerId = from;
 
-  const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+  const pc = new RTCPeerConnection({ iceServers });
   peerConnection = pc;
 
   pc.onicecandidate = (event) => {
@@ -245,7 +249,7 @@ window.relay.onIncomingSignal((message) => {
   }
   const { payload } = message;
   if (payload.kind === "offer") {
-    void handleOffer(message.from, payload.sdp);
+    void handleOffer(message.from, payload.sdp, message.iceServers ?? FALLBACK_ICE_SERVERS);
   } else if (payload.kind === "ice-candidate") {
     void handleIceCandidate(payload.candidate);
   }
